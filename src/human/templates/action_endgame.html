@@ -1,0 +1,33 @@
+<input type="hidden" name="action_kind" value="substrate-guess" />
+
+<p class="muted">Game over. Submit one substrate guess at a time.</p>
+
+<label class="action-row">
+  <span class="action-label">Target</span>
+  <select name="target" required>
+    <option value="">— pick a player —</option>
+    {% for p in living_players %}
+      <option value="{{ p }}">{{ p[:18] }}</option>
+    {% endfor %}
+  </select>
+</label>
+
+<fieldset class="action-row">
+  <legend class="action-label">Guess</legend>
+  <label class="radio"><input type="radio" name="guess" value="human" required /> human</label>
+  <label class="radio"><input type="radio" name="guess" value="agent" required /> agent</label>
+</fieldset>
+
+<label class="action-row">
+  <span class="action-label">Confidence</span>
+  <input type="range" name="confidence" min="0" max="1" step="0.05" value="0.5" />
+</label>
+
+<label class="action-row action-row-text">
+  <span class="action-label">Reasoning</span>
+  <textarea name="text" rows="2" placeholder="what tipped you off"></textarea>
+</label>
+
+<div class="action-row action-row-controls">
+  <button type="submit" class="primary">Submit guess</button>
+</div>

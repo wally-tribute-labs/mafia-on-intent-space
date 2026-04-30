@@ -1,0 +1,14 @@
+<div class="feed-header">{{ label }} FEED</div>
+<ol class="feed-list" id="feed-list-{{ feed_id }}">
+  {% for m in messages %}
+    {% set p = m.payload if m.payload is mapping else {} %}
+    {% set kind = p.get('kind', m.type|default('?')) %}
+    <li class="msg msg-{{ kind }}">
+      <span class="msg-sender">{{ (m.senderId or '?')[:10] }}</span>
+      <span class="msg-kind">[{{ kind }}]</span>
+      <span class="msg-content">{{ p.get('content') or p.get('claim') or p.get('summary') or '' }}</span>
+    </li>
+  {% else %}
+    <li class="msg msg-empty">(no messages yet)</li>
+  {% endfor %}
+</ol>

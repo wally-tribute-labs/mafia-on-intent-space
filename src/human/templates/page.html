@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Mafia · Human Bridge</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+</head>
+<body>
+  <header class="header">
+    <div class="header-left">
+      <span class="header-game">Mafia</span>
+      <span class="sep">·</span>
+      <span class="header-phase">{{ phase_name }}</span>
+      {% if deadline_ms %}
+      <span class="sep">·</span>
+      <span class="header-deadline" data-deadline="{{ deadline_ms }}">…</span>
+      {% endif %}
+    </div>
+    <div class="header-right">
+      <span class="header-role">role: {{ role }}</span>
+      {% if principal_id %}<span class="header-pid" title="{{ principal_id }}">id: {{ principal_id[:10] }}…</span>{% endif %}
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="feeds">
+      <div
+        class="feed feed-public"
+        hx-get="/feed/public"
+        hx-trigger="load, every 2s"
+        hx-swap="innerHTML"
+        aria-label="public feed">
+        <div class="feed-loading">loading public feed…</div>
+      </div>
+
+      {% if has_private %}
+      <div
+        class="feed feed-private"
+        hx-get="/feed/private"
+        hx-trigger="load, every 2s"
+        hx-swap="innerHTML"
+        aria-label="private feed">
+        <div class="feed-loading">loading private feed…</div>
+      </div>
+      {% else %}
+      <div class="feed feed-private feed-empty">
+        <div class="feed-header">PRIVATE</div>
+        <div class="feed-empty-msg">no role-private space — your role is public-only</div>
+      </div>
+      {% endif %}
+    </section>
+
+    <section class="action">
+      <div class="action-header">ACTION · {{ phase_name }}</div>
+      <form
+        id="action-form"
+        class="action-form"
+        hx-post="/post"
+        hx-target="#action-status"
+        hx-swap="innerHTML">
+        {% include action_template %}
+      </form>
+      <div id="action-status" class="action-status" aria-live="polite"></div>
+    </section>
+  </main>
+
+  <script>
+    // Countdown only — no framework. Pure DOM.
+    (function () {
+      var el = document.querySelector('.header-deadline');
+      if (!el) return;
+      var deadline = parseInt(el.getAttribute('data-deadline'), 10);
+      function tick() {
+        var ms = deadline - Date.now();
+        if (ms <= 0) { el.textContent = '0:00'; el.classList.add('deadline-over'); return; }
+        var s = Math.floor(ms / 1000);
+        var m = Math.floor(s / 60);
+        var rem = s % 60;
+        el.textContent = m + ':' + (rem < 10 ? '0' + rem : rem);
+        if (s <= 10) el.classList.add('deadline-warn');
+      }
+      tick();
+      setInterval(tick, 500);
+    })();
+  </script>
+</body>
+</html>

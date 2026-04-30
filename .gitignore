@@ -1,0 +1,21 @@
+# Local agent state (keys, enrollments, transcripts) — NEVER commit
+# Catches both `.intent-space/` (default) and `.intent-space-<name>/` (per-agent workspaces)
+.intent-space/
+.intent-space-*/
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+node_modules/
+.env
+.env.local
+
+# Logs and recordings
+*.log
+recordings/
+artifacts/*.json
+!artifacts/.gitkeep
+
+# Editor
+.vscode/
+.idea/

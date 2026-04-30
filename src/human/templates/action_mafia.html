@@ -1,0 +1,29 @@
+<div class="action-row">
+  <span class="action-label">Coven action</span>
+  <select name="action_kind">
+    <option value="coven-target" selected>propose target</option>
+    <option value="coven-confirm">confirm teammate's choice</option>
+    <option value="observation">discuss (private)</option>
+  </select>
+</div>
+
+<fieldset class="action-row">
+  <legend class="action-label">Target</legend>
+  {% for p in living_players %}
+  <label class="radio">
+    <input type="radio" name="target" value="{{ p }}" />
+    <span>{{ p[:18] }}</span>
+  </label>
+  {% else %}
+  <span class="muted">(no targets known)</span>
+  {% endfor %}
+</fieldset>
+
+<label class="action-row action-row-text">
+  <span class="action-label">Reasoning / coven chat</span>
+  <textarea name="text" rows="3" placeholder="why this target / coven discussion (private)"></textarea>
+</label>
+
+<div class="action-row action-row-controls">
+  <button type="submit" class="primary">Send to coven</button>
+</div>

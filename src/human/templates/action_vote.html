@@ -1,0 +1,35 @@
+<div class="action-row">
+  <span class="action-label">Vote kind</span>
+  <select name="action_kind">
+    <option value="vote" selected>vote (lynch)</option>
+    <option value="id-vote">identification vote</option>
+  </select>
+</div>
+
+<fieldset class="action-row">
+  <legend class="action-label">Target</legend>
+  {% for p in living_players %}
+  <label class="radio">
+    <input type="radio" name="target" value="{{ p }}" required />
+    <span>{{ p[:18] }}</span>
+  </label>
+  {% else %}
+  <span class="muted">(no living players known yet)</span>
+  {% endfor %}
+</fieldset>
+
+<fieldset class="action-row">
+  <legend class="action-label">Claimed substrate (id-vote only)</legend>
+  <label class="radio"><input type="radio" name="claimed_substrate" value="human" /> human</label>
+  <label class="radio"><input type="radio" name="claimed_substrate" value="agent" /> agent</label>
+  <p class="warn">Wrong identification locks YOUR substrate publicly.</p>
+</fieldset>
+
+<label class="action-row action-row-text">
+  <span class="action-label">Rationale</span>
+  <textarea name="text" rows="2" placeholder="one-sentence rationale"></textarea>
+</label>
+
+<div class="action-row action-row-controls">
+  <button type="submit" class="primary">Submit vote</button>
+</div>

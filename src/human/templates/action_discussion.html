@@ -1,0 +1,41 @@
+<label class="action-row">
+  <span class="action-label">Action</span>
+  <select name="action_kind">
+    <option value="observation" selected>observation</option>
+    <option value="accusation">accusation</option>
+    <option value="defense">defense</option>
+    <option value="pass">pass</option>
+  </select>
+</label>
+
+<label class="action-row">
+  <span class="action-label">Target (optional)</span>
+  <select name="target">
+    <option value="">— none —</option>
+    {% for p in living_players %}
+      <option value="{{ p }}">{{ p[:14] }}</option>
+    {% endfor %}
+  </select>
+</label>
+
+<label class="action-row action-row-text">
+  <span class="action-label">Speak</span>
+  <textarea name="text" rows="3" placeholder="say something…"></textarea>
+</label>
+
+<div class="action-row action-row-controls">
+  <label class="checkbox">
+    <input type="checkbox" name="robot_mode_pending" />
+    Robot Mode (rewrite via LLM)
+  </label>
+  <button
+    type="button"
+    class="secondary"
+    hx-post="/rewrite_robot"
+    hx-include="closest form"
+    hx-target=".robot-preview-slot"
+    hx-swap="innerHTML">Preview Robot rewrite</button>
+  <button type="submit" class="primary">Send</button>
+</div>
+
+<div class="robot-preview-slot"></div>

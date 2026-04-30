@@ -1,0 +1,17 @@
+<input type="hidden" name="action_kind" value="investigate" />
+
+<label class="action-row">
+  <span class="action-label">Investigate</span>
+  <select name="target" required>
+    <option value="">— pick a target —</option>
+    {% for p in living_players %}
+      <option value="{{ p }}">{{ p[:18] }}</option>
+    {% endfor %}
+  </select>
+</label>
+
+<div class="action-row action-row-controls">
+  <button type="submit" class="primary">Investigate</button>
+</div>
+
+<p class="muted">Past results appear in your private feed.</p>

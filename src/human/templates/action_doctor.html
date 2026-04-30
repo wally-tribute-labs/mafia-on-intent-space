@@ -1,0 +1,20 @@
+<input type="hidden" name="action_kind" value="protect" />
+
+<label class="action-row">
+  <span class="action-label">Protect</span>
+  <select name="target" required>
+    <option value="">— pick a target —</option>
+    {% for p in living_players %}
+      <option value="{{ p }}">{{ p[:18] }}</option>
+    {% endfor %}
+  </select>
+</label>
+
+<label class="action-row checkbox">
+  <input type="checkbox" name="self_protect" value="true" />
+  Self-protect (one-time use)
+</label>
+
+<div class="action-row action-row-controls">
+  <button type="submit" class="primary">Protect</button>
+</div>
