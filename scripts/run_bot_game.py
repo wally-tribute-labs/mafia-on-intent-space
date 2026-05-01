@@ -29,6 +29,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO
@@ -36,6 +37,31 @@ from typing import IO
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOGS_DIR = PROJECT_ROOT / "logs"
+
+
+def _load_dotenv() -> None:
+    """Best-effort: read PROJECT_ROOT/.env into os.environ so subprocesses
+    inherit ANTHROPIC_API_KEY without the user having to `source` first.
+
+    Lines starting with `#` are skipped. Quotes are stripped. Existing
+    env vars take precedence (no overwrite).
+    """
+    env_file = PROJECT_ROOT / ".env"
+    if not env_file.exists():
+        return
+    for raw in env_file.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if not key or key in os.environ:
+            continue
+        os.environ[key] = value
+
+
+_load_dotenv()
 
 
 @dataclass
@@ -167,6 +193,19 @@ def _wait_for_host(host: Child, bot_children: list[Child],
         time.sleep(1.0)
 
 
+def _wait_for_bots(bot_children: list[Child], *, grace_s: float, log: logging.Logger) -> None:
+    """Give bots time to scan game-end and exit cleanly before teardown."""
+    deadline = time.time() + grace_s
+    while time.time() < deadline:
+        alive = [c for c in bot_children if c.proc.poll() is None]
+        if not alive:
+            return
+        time.sleep(1.0)
+    alive = [c.name for c in bot_children if c.proc.poll() is None]
+    if alive:
+        log.info("bot grace expired; still running: %s", ", ".join(alive))
+
+
 def _grep_log_for(path: Path, needle: str) -> bool:
     if not path.exists():
         return False
@@ -187,9 +226,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-days", type=int, default=7)
     parser.add_argument("--timeout-s", type=float, default=600.0,
                         help="Hard timeout for the host process before forced teardown.")
+    parser.add_argument("--bot-finish-grace-s", type=float, default=45.0,
+                        help="After host exits, wait this long for bots to observe game-end.")
     parser.add_argument("--persona", default="random",
                         help="Force a specific persona for every bot, or 'random'.")
-    parser.add_argument("--llm-model", default="claude-3-5-haiku-latest")
+    parser.add_argument("--llm-model", default="claude-haiku-4-5-20251001")
     parser.add_argument("--rng-seed", type=int, default=None)
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(argv)
@@ -212,6 +253,10 @@ def main(argv: list[str] | None = None) -> int:
     base_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     children: list[Child] = []
     host_child: Child | None = None
+    # Per-run identifier so bots can ignore stale lobby-open INTENTs left
+    # behind by previous runs in the (append-only) commons.
+    run_id = uuid.uuid4().hex[:12]
+    log.info("run_id=%s", run_id)
 
     def _shutdown(_signum=None, _frame=None) -> None:
         log.info("shutdown requested")
@@ -230,6 +275,7 @@ def main(argv: list[str] | None = None) -> int:
         "--max-days", str(args.max_days),
         "--workspace", str(PROJECT_ROOT / ".intent-space-mafia-game-host"),
         "--log-level", args.log_level,
+        "--game-id", run_id,
     ]
     log.info("spawning host: %s", " ".join(host_argv))
     host_child = _spawn("host", host_argv, base_env)
@@ -251,6 +297,7 @@ def main(argv: list[str] | None = None) -> int:
             "--substrate", "agent",
             "--lobby-wait-s", str(max(args.lobby_deadline_s + 30.0, 120.0)),
             "--log-level", args.log_level,
+            "--game-id", run_id,
         ]
         if args.rng_seed is not None:
             bot_argv += ["--rng-seed", str(rng.randint(0, 1_000_000))]
@@ -267,7 +314,8 @@ def main(argv: list[str] | None = None) -> int:
     host_rc = host_child.proc.returncode
     log.info("host exited rc=%s after %.1fs (or timed out)", host_rc, elapsed)
 
-    # --- 4. Tear down bots ---
+    # --- 4. Give bots a chance to see game-end, then tear down leftovers ---
+    _wait_for_bots(bot_children, grace_s=args.bot_finish_grace_s, log=log)
     _terminate_all(children, log)
 
     # --- 5. Summary ---

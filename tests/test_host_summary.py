@@ -156,7 +156,10 @@ def test_summary_intent_posted_to_commons_after_game_end():
     summary_steps = [p for p in session.posted if p["step"] == "host.summary"]
     assert len(summary_steps) == 1, f"expected exactly one summary; got {summary_steps}"
     summary = summary_steps[0]
-    assert summary["confirm_space_id"] == "commons"
+    # The summary INTENT lives inside the lobby-open intent's interior;
+    # confirming via a top-level commons scan would never see it because
+    # post_and_confirm matches by parentId in the scanned space.
+    assert summary["confirm_space_id"] == "intent-lobby-1"
 
     msg = summary["message"]
     assert msg["type"] == "INTENT"

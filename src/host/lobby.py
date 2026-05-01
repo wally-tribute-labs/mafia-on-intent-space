@@ -39,9 +39,14 @@ def _payload(m: dict) -> dict:
 
 
 def _collect_joins(messages: list[dict], lobby_intent_id: str) -> list[str]:
-    """Walk commons messages and return principals that PROMISE'd to join.
+    """Walk lobby-interior messages and return principals that PROMISE'd to join.
 
-    First-PROMISE-per-principal wins; later duplicates are ignored.
+    Returns the joiner's HOME principal (from `payload.principal_id`), NOT
+    the PROMISE's senderId — agents can have a different commons-scoped
+    principal vs home-scoped principal, and the steward needs the home
+    one when adding the agent to a new shared space.
+
+    First-PROMISE-per-(home-principal) wins; later duplicates are ignored.
     """
     seen: set[str] = set()
     joined: list[str] = []
@@ -54,15 +59,15 @@ def _collect_joins(messages: list[dict], lobby_intent_id: str) -> list[str]:
         if payload.get("kind") != "lobby-join":
             continue
         try:
-            LobbyJoinPayload.model_validate(payload)
+            validated = LobbyJoinPayload.model_validate(payload)
         except Exception:
             logger.debug("Discarding malformed lobby-join: %r", payload)
             continue
-        sender = m.get("senderId")
-        if not isinstance(sender, str) or sender in seen:
+        principal = validated.principal_id
+        if not isinstance(principal, str) or principal in seen:
             continue
-        seen.add(sender)
-        joined.append(sender)
+        seen.add(principal)
+        joined.append(principal)
     return joined
 
 
@@ -73,6 +78,7 @@ def run_lobby(
     *,
     seats: int | None = None,
     poll_interval_s: float = 1.0,
+    game_id: str | None = None,
     now: callable = time.time,
     sleep: callable = time.sleep,
 ) -> LobbyResult:
@@ -90,14 +96,18 @@ def run_lobby(
     seats_value = player_count if seats is None else seats
     deadline_ms = int(deadline_s * 1000)
 
-    open_payload = validate(
-        {
-            "kind": "lobby-open",
-            "content": f"Mafia game forming — {seats_value} seats, hidden substrate mix",
-            "seats": seats_value,
-            "deadline_ms": deadline_ms,
-        }
-    )
+    open_payload_in: dict = {
+        "kind": "lobby-open",
+        "content": f"Mafia game forming — {seats_value} seats, hidden substrate mix",
+        "seats": seats_value,
+        "deadline_ms": deadline_ms,
+    }
+    # Per-run tag so bots launched by this orchestrator can distinguish
+    # this lobby-open from stale ones still visible in commons. Reusing
+    # `game_id` (already on BasePayload) avoids a schema change.
+    if isinstance(game_id, str) and game_id:
+        open_payload_in["game_id"] = game_id
+    open_payload = validate(open_payload_in)
     intent = session.intent(
         content=open_payload.get("content") or "lobby-open",
         parent_id=COMMONS_SPACE_ID,
@@ -118,10 +128,15 @@ def run_lobby(
     deadline_t = now() + deadline_s
     joined: list[str] = []
     while True:
+        # lobby-join PROMISEs are posted with parent_id=lobby_intent_id, so
+        # they live inside the lobby-open INTENT's interior space, not in
+        # commons proper. We scan that interior to collect joins.
         try:
-            scan = session.scan_full(COMMONS_SPACE_ID)
+            scan = session.scan_full(lobby_intent_id)
         except Exception as exc:
-            raise RuntimeError(f"commons scan_full failed during lobby: {exc}") from exc
+            raise RuntimeError(
+                f"lobby interior scan_full failed during lobby: {exc}"
+            ) from exc
         joined = _collect_joins(scan.get("messages", []), lobby_intent_id)
         if len(joined) >= player_count:
             logger.info("lobby filled: %d/%d", len(joined), player_count)

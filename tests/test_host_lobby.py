@@ -38,7 +38,11 @@ class MockSession:
         return message
 
     def scan_full(self, space_id: str) -> dict:
-        assert space_id == COMMONS_SPACE_ID
+        # run_lobby scans the lobby-open intent's interior (not commons)
+        # to collect lobby-join PROMISEs, since they're posted nested
+        # under that intent.
+        if space_id == COMMONS_SPACE_ID:
+            return {"messages": [], "latestSeq": 0}
         if self._scan_sequence:
             return {"messages": self._scan_sequence.pop(0), "latestSeq": 0}
         return {"messages": [], "latestSeq": 0}
@@ -49,7 +53,9 @@ def _join(sender: str, lobby_intent_id: str, agent_label: str = "test") -> dict:
         "type": "PROMISE",
         "promiseId": f"promise-{sender}",
         "intentId": lobby_intent_id,
-        "parentId": "commons",
+        # PROMISEs are posted nested under the lobby-open intent, so the
+        # parentId is the lobby-open intent's id (its interior space).
+        "parentId": lobby_intent_id,
         "senderId": sender,
         "timestamp": 0,
         "payload": {

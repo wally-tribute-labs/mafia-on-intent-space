@@ -4,7 +4,7 @@ Usage:
     python -m src.bots.run \\
         --workspace .intent-space-mafia-player-1 \\
         --persona random \\
-        --llm-model claude-3-5-haiku-latest
+        --llm-model claude-haiku-4-5-20251001
 
 Flow (matches docs/PROTOCOL_MAPPING.md §Lobby formation, §Game start):
 
@@ -87,10 +87,15 @@ COMMONS_SPACE_ID = "commons"
 # Map shorthand model aliases the orchestrator might pass to canonical
 # Anthropic identifiers. Unknown aliases pass through unchanged.
 _MODEL_ALIASES: dict[str, str] = {
-    "claude-haiku-3-5": "claude-3-5-haiku-latest",
-    "claude-haiku-3.5": "claude-3-5-haiku-latest",
-    "claude-3-5-haiku": "claude-3-5-haiku-latest",
-    "claude-sonnet-3-5": "claude-3-5-sonnet-latest",
+    "claude-haiku": "claude-haiku-4-5-20251001",
+    "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+    "claude-haiku-3-5": "claude-haiku-4-5-20251001",
+    "claude-haiku-3.5": "claude-haiku-4-5-20251001",
+    "claude-3-5-haiku": "claude-haiku-4-5-20251001",
+    "claude-3-5-haiku-latest": "claude-haiku-4-5-20251001",
+    "claude-sonnet": "claude-sonnet-4-6",
+    "claude-sonnet-4-6": "claude-sonnet-4-6",
+    "claude-sonnet-3-5": "claude-sonnet-4-6",
 }
 
 
@@ -141,22 +146,73 @@ def _switch_to(session, target: dict, *, log: logging.Logger, label: str) -> Non
     log.info("switched session -> %s (audience=%s)", label, target["audience"])
 
 
+def _select_target_lobby(messages: list[dict], game_id: str | None) -> dict | None:
+    """Pick the relevant lobby-open INTENT from a commons scan.
+
+    If `game_id` is provided, return the (latest) lobby-open whose payload
+    carries a matching `game_id` — bulletproof against stale lobbies.
+
+    Otherwise (direct invocation, no orchestrator tag): return the highest-
+    seq lobby-open with `seats > 0`. Smoke-test 0-seat lobbies are skipped
+    so they don't trap a real bot.
+    """
+    candidates: list[tuple[int, dict]] = []
+    for m in messages:
+        if m.get("type") != "INTENT":
+            continue
+        payload = m.get("payload")
+        if not isinstance(payload, dict) or payload.get("kind") != "lobby-open":
+            continue
+        seq = m.get("seq")
+        if not isinstance(seq, int):
+            continue
+        if game_id is not None:
+            if payload.get("game_id") == game_id:
+                candidates.append((seq, m))
+            continue
+        seats = payload.get("seats")
+        if isinstance(seats, int) and seats > 0:
+            candidates.append((seq, m))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0])
+    return candidates[-1][1]
+
+
 def _join_lobby(home_session, principal_id: str, substrate: str,
-                wait_s: float, log: logging.Logger) -> str:
+                wait_s: float, log: logging.Logger,
+                game_id: str | None = None,
+                agent_label: str = "bot") -> str:
     """Wait for the host's lobby-open INTENT in commons and post lobby-join.
 
-    Returns the lobby-open intent id.
+    Returns the lobby-open intent id. Filters out stale `lobby-open`
+    intents from previous runs (commons is append-only and accumulates
+    them across the lifetime of the space).
     """
-    log.info("waiting for lobby-open in commons (timeout=%.0fs)", wait_s)
-    lobby = home_session.wait_for_intent(
-        COMMONS_SPACE_ID,
-        payload_predicate=lambda pl: isinstance(pl, dict) and pl.get("kind") == "lobby-open",
-        wait_seconds=wait_s,
-    )
+    if game_id:
+        log.info("waiting for lobby-open in commons (game_id=%s, timeout=%.0fs)",
+                 game_id, wait_s)
+    else:
+        log.info("waiting for lobby-open in commons (latest non-zero-seat, "
+                 "timeout=%.0fs)", wait_s)
+    deadline = time.time() + wait_s
+    lobby: dict | None = None
+    while time.time() < deadline:
+        scan = home_session.scan_full(COMMONS_SPACE_ID)
+        lobby = _select_target_lobby(scan.get("messages", []), game_id)
+        if lobby is not None:
+            break
+        time.sleep(1.0)
+    if lobby is None:
+        raise TimeoutError(
+            f"no matching lobby-open in commons after {wait_s:.0f}s "
+            f"(game_id={game_id!r})"
+        )
     lobby_intent_id = lobby.get("intentId")
     if not isinstance(lobby_intent_id, str):
         raise RuntimeError(f"lobby-open intent missing intentId: {lobby!r}")
-    log.info("found lobby-open: %s", lobby_intent_id)
+    log.info("found lobby-open: %s (seq=%s)",
+             lobby_intent_id, lobby.get("seq"))
 
     promise = home_session.promise(
         parent_id=lobby_intent_id,
@@ -165,6 +221,7 @@ def _join_lobby(home_session, principal_id: str, substrate: str,
         payload={
             "kind": "lobby-join",
             "principal_id": principal_id,
+            "agent_label": agent_label,
             "agent_substrate": substrate,
         },
     )
@@ -177,7 +234,7 @@ def _join_lobby(home_session, principal_id: str, substrate: str,
     return lobby_intent_id
 
 
-def _find_invitations(messages: list[dict]) -> dict[str, dict]:
+def _find_invitations(messages: list[dict], *, not_before_ms: int | None = None) -> dict[str, dict]:
     """Pick out shared-space invitation INTENTs from a home-space scan.
 
     Keyed by `shared_space_id` so duplicates are dropped. Spacebase1
@@ -188,6 +245,10 @@ def _find_invitations(messages: list[dict]) -> dict[str, dict]:
     for m in messages:
         if m.get("type") != "INTENT":
             continue
+        if not_before_ms is not None:
+            ts = m.get("timestamp")
+            if isinstance(ts, int) and ts < not_before_ms:
+                continue
         payload = m.get("payload")
         if not isinstance(payload, dict):
             continue
@@ -203,6 +264,7 @@ def _find_invitations(messages: list[dict]) -> dict[str, dict]:
 def _wait_for_invitations(home_session, home_space_id: str, *,
                           min_count: int, deadline_s: float,
                           settle_s: float,
+                          not_before_ms: int | None,
                           log: logging.Logger) -> list[dict]:
     """Poll our home space until at least `min_count` invitations arrive,
     then wait `settle_s` more so any trailing invitation is captured.
@@ -218,7 +280,7 @@ def _wait_for_invitations(home_session, home_space_id: str, *,
     seen: dict[str, dict] = {}
     while time.time() < deadline:
         messages = home_session.scan_full(home_space_id).get("messages", [])
-        seen = _find_invitations(messages)
+        seen = _find_invitations(messages, not_before_ms=not_before_ms)
         if len(seen) >= min_count:
             break
         time.sleep(2.0)
@@ -233,7 +295,7 @@ def _wait_for_invitations(home_session, home_space_id: str, *,
     while time.time() < end_settle:
         time.sleep(1.0)
         messages = home_session.scan_full(home_space_id).get("messages", [])
-        seen = _find_invitations(messages)
+        seen = _find_invitations(messages, not_before_ms=not_before_ms)
     log.info("collected %d invitation(s): %s", len(seen), sorted(seen.keys()))
     return list(seen.values())
 
@@ -378,7 +440,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="Per-bot workspace directory (must already be enrolled).")
     parser.add_argument("--persona", default="random",
                         help="Persona name from personas.json, or 'random'.")
-    parser.add_argument("--llm-model", default="claude-3-5-haiku-latest",
+    parser.add_argument("--llm-model", default="claude-haiku-4-5-20251001",
                         help="Model identifier passed to the LLM provider.")
     parser.add_argument("--substrate", default="agent",
                         choices=["agent", "human"])
@@ -390,6 +452,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="Minimum invitations to wait for (game + notebook).")
     parser.add_argument("--rng-seed", type=int, default=None)
     parser.add_argument("--log-level", default="INFO")
+    parser.add_argument("--game-id", default=None,
+                        help="Per-run tag echoed by the host's lobby-open. "
+                             "When set, the bot ignores any lobby-open "
+                             "without a matching game_id.")
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -456,10 +522,15 @@ def main(argv: list[str] | None = None) -> int:
         return 4
     try:
         _join_lobby(home_session, home_principal_id, args.substrate,
-                    args.lobby_wait_s, log)
+                    args.lobby_wait_s, log, game_id=args.game_id,
+                    agent_label=agent_name)
     except Exception as exc:
         log.error("lobby join failed: %s", exc)
         return 4
+    # Ignore stale invitations already present in this home space from
+    # previous E2E runs. The steward timestamps current-run invitations
+    # after this point.
+    invitation_not_before_ms = int(time.time() * 1000) - 1000
 
     # ---- Switch back to home for invitations ----
     try:
@@ -475,6 +546,7 @@ def main(argv: list[str] | None = None) -> int:
             min_count=args.min_invitations,
             deadline_s=args.invitation_wait_s,
             settle_s=args.invitation_settle_s,
+            not_before_ms=invitation_not_before_ms,
             log=log,
         )
     except Exception as exc:

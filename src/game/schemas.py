@@ -71,6 +71,10 @@ class LobbyJoinPayload(BasePayload):
     kind: Literal["lobby-join"] = "lobby-join"
     principal_id: str = Field(...)
     agent_label: str = Field(...)
+    # Substrate the joiner *claims* at lobby time. Truth is reaffirmed
+    # at game-end via substrate-guess. Optional so legacy lobby-joins
+    # (without a substrate hint) still validate.
+    agent_substrate: Substrate | None = None
 
 
 class GameInitPayload(BasePayload):

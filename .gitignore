@@ -12,6 +12,7 @@ node_modules/
 
 # Logs and recordings
 *.log
+logs/
 recordings/
 artifacts/*.json
 !artifacts/.gitkeep

@@ -127,6 +127,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lobby-deadline-s", type=float, default=60.0)
     parser.add_argument("--max-days", type=int, default=7)
     parser.add_argument("--log-level", default="INFO")
+    parser.add_argument("--game-id", default=None,
+                        help="Optional per-run tag echoed in the lobby-open "
+                             "payload so bots can filter out stale lobbies.")
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -176,6 +179,7 @@ def main(argv: list[str] | None = None) -> int:
             session,
             player_count=args.player_count,
             deadline_s=args.lobby_deadline_s,
+            game_id=args.game_id,
         )
     except Exception as exc:
         log.error("lobby failed: %s", exc)

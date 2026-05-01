@@ -36,9 +36,9 @@ class LLMError(RuntimeError):
 
 
 class AnthropicProvider:
-    """Claude Haiku 3.5 via raw HTTPS — no anthropic-py dependency."""
+    """Claude Haiku via raw HTTPS — no anthropic-py dependency."""
 
-    DEFAULT_MODEL = "claude-3-5-haiku-latest"
+    DEFAULT_MODEL = "claude-haiku-4-5-20251001"
     URL = "https://api.anthropic.com/v1/messages"
     API_VERSION = "2023-06-01"
 

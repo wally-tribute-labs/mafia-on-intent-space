@@ -110,7 +110,7 @@ def _post_phase_end(
     payload = validate(payload_dict)
     complete = session.complete(
         promise_id=promise_id or phase_intent_id,
-        parent_id=phase_intent_id,
+        parent_id=space_id,
         summary=f"phase-end {phase_intent_id}",
         payload=payload,
     )
@@ -184,7 +184,7 @@ def _post_reveal(
     )
     complete = session.complete(
         promise_id=state.game_init_intent_id,
-        parent_id=state.game_init_intent_id,
+        parent_id=state.game_space_id,
         summary="reveal",
         payload=payload,
     )
@@ -229,8 +229,12 @@ def _post_summary_to_commons(
         parent_id=parent,
         payload=payload,
     )
+    # The summary INTENT lives in `parent`'s interior (lobby-open intent
+    # space when present, top-level commons otherwise). Confirming via a
+    # commons scan would never see it — post_and_confirm matches by
+    # parentId+intentId in the scanned interior.
     return session.post_and_confirm(
-        intent, step="host.summary", confirm_space_id="commons"
+        intent, step="host.summary", confirm_space_id=parent
     )
 
 

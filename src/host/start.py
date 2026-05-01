@@ -115,27 +115,81 @@ class GameState:
 
 
 def _extract_access(payload: dict) -> dict[str, str] | None:
-    """Pull (endpoint, station_token, audience, principal_id) out of a steward COMPLETE.
+    """Pull (endpoint, station_token, audience, principal_id) out of an
+    invitation INTENT payload.
 
-    Returns None if any required field is missing — the caller can decide
-    whether to raise (live) or skip (test/empty). `principal_id` is optional
-    (may be absent in some COMPLETE payloads or test fixtures); when present
-    it's the audience-scoped principal the host should authenticate as.
+    The spacebase1 steward returns a minimal `COMPLETE` payload
+    (`shared_space_id`, `participant_principals`, etc.) — the actual access
+    materials live in a separate auto-generated invitation INTENT posted
+    into each participant's home space. Those invitations carry an
+    `access` dict (`itp_endpoint`, `station_token`, `audience`, ...).
+
+    Accepts either a top-level access dict OR a full invitation payload
+    (with nested `access`). Returns None if required fields are missing.
     """
-    endpoint = payload.get("itp_endpoint")
-    token = payload.get("station_token")
-    audience = payload.get("audience")
+    if not isinstance(payload, dict):
+        return None
+    if "access" in payload and isinstance(payload["access"], dict):
+        access = payload["access"]
+    else:
+        access = payload
+    endpoint = access.get("itp_endpoint") or access.get("endpoint")
+    token = access.get("station_token")
+    audience = access.get("audience")
     if isinstance(endpoint, str) and isinstance(token, str) and isinstance(audience, str):
         out: dict[str, str] = {
             "endpoint": endpoint,
             "station_token": token,
             "audience": audience,
         }
-        principal = payload.get("principal_id") or payload.get("requester_principal_id")
+        principal = (
+            access.get("principal_id")
+            or payload.get("principal_id")
+            or payload.get("requester_principal_id")
+        )
         if isinstance(principal, str):
             out["principal_id"] = principal
         return out
     return None
+
+
+def _find_invitation_in_home(session, *, host_home_space_id: str,
+                             shared_space_id: str,
+                             timeout_s: float = 10.0) -> dict | None:
+    """Poll host's home space for the auto-generated invitation INTENT.
+
+    The steward posts an invitation INTENT carrying access materials into
+    the home space of every participant (including the requester) right
+    after `COMPLETE`. We scan home for the matching invitation, identified
+    by either the canonical `spacebase1:invite:<shared>:...` intentId or
+    by `payload.shared_space_id == shared_space_id`.
+
+    Caller MUST be connected to home before calling.
+    """
+    import time
+    scan_full = getattr(session, "scan_full", None)
+    if not callable(scan_full):
+        return None
+    deadline = time.time() + timeout_s
+    while True:
+        try:
+            scan = scan_full(host_home_space_id)
+        except Exception:
+            scan = {"messages": []}
+        for m in scan.get("messages", []) or []:
+            if m.get("type") != "INTENT":
+                continue
+            payload = m.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("shared_space_id") != shared_space_id:
+                continue
+            access = payload.get("access")
+            if isinstance(access, dict):
+                return payload
+        if time.time() >= deadline:
+            return None
+        time.sleep(0.5)
 
 
 def _connect_with_access(session, access: dict[str, str], *, sender_id: str, purpose: str) -> None:
@@ -357,18 +411,49 @@ def start_game(
     if commons_access is not None:
         subspace_access["commons"] = commons_access
 
-    # ---- Public game space ----
-    if players:
-        game_payload = _request_shared_space(
+    def _provision(purpose: str, participants: list[str]) -> tuple[str, dict[str, str] | None]:
+        """Provision a shared space, then look up the auto-invitation in
+        host's home to capture access materials. Returns
+        (shared_space_id, access-or-None). The caller is responsible for
+        calling _connect_with_access(...) before posting into the new
+        space, and for switching back to home before the next provisioning
+        call (so subsequent invitation lookups work).
+        """
+        complete_payload = _request_shared_space(
             session,
             host_home_space_id=host_home_space_id,
-            participant_principals=[host_principal_id, *players],
-            purpose="game-space",
+            participant_principals=participants,
+            purpose=purpose,
             promise_wait_s=promise_wait_s,
             complete_wait_s=complete_wait_s,
         )
-        game_space_id = game_payload["shared_space_id"]
-        game_access = _extract_access(game_payload)
+        shared_id = complete_payload["shared_space_id"]
+        # Try invitation lookup first; if access wasn't surfaced via
+        # the invitation (test fixtures, future steward changes), fall
+        # back to whatever the COMPLETE payload carried directly.
+        invitation = _find_invitation_in_home(
+            session,
+            host_home_space_id=host_home_space_id,
+            shared_space_id=shared_id,
+        )
+        access = _extract_access(invitation) if invitation else None
+        if access is None:
+            access = _extract_access(complete_payload)
+        return shared_id, access
+
+    def _switch_home() -> None:
+        if home_access is not None:
+            _connect_with_access(
+                session, home_access,
+                sender_id=host_principal_id,
+                purpose="home",
+            )
+
+    # ---- Public game space ----
+    if players:
+        game_space_id, game_access = _provision(
+            "game-space", [host_principal_id, *players]
+        )
         if game_access is not None:
             subspace_access[game_space_id] = game_access
             _connect_with_access(
@@ -412,16 +497,10 @@ def start_game(
         doctor = [p for p in players if role_truth[p] == "doctor"]
 
         if mafia:
-            coven = _request_shared_space(
-                session,
-                host_home_space_id=host_home_space_id,
-                participant_principals=[host_principal_id, *mafia],
-                purpose="coven",
-                promise_wait_s=promise_wait_s,
-                complete_wait_s=complete_wait_s,
+            _switch_home()
+            coven_id, coven_access = _provision(
+                "coven", [host_principal_id, *mafia]
             )
-            coven_id = coven["shared_space_id"]
-            coven_access = _extract_access(coven)
             if coven_access is not None:
                 subspace_access[coven_id] = coven_access
                 _connect_with_access(
@@ -458,16 +537,10 @@ def start_game(
                     f"coven-membership post failed: {exc}"
                 ) from exc
         if detective:
-            det = _request_shared_space(
-                session,
-                host_home_space_id=host_home_space_id,
-                participant_principals=[host_principal_id, *detective],
-                purpose="detective",
-                promise_wait_s=promise_wait_s,
-                complete_wait_s=complete_wait_s,
+            _switch_home()
+            detective_id, det_access = _provision(
+                "detective", [host_principal_id, *detective]
             )
-            detective_id = det["shared_space_id"]
-            det_access = _extract_access(det)
             if det_access is not None:
                 subspace_access[detective_id] = det_access
                 _connect_with_access(
@@ -476,16 +549,10 @@ def start_game(
                     purpose="detective",
                 )
         if doctor:
-            doc = _request_shared_space(
-                session,
-                host_home_space_id=host_home_space_id,
-                participant_principals=[host_principal_id, *doctor],
-                purpose="doctor",
-                promise_wait_s=promise_wait_s,
-                complete_wait_s=complete_wait_s,
+            _switch_home()
+            doctor_id, doc_access = _provision(
+                "doctor", [host_principal_id, *doctor]
             )
-            doctor_id = doc["shared_space_id"]
-            doc_access = _extract_access(doc)
             if doc_access is not None:
                 subspace_access[doctor_id] = doc_access
                 _connect_with_access(
@@ -496,21 +563,17 @@ def start_game(
 
         # ---- Per-player private notebooks for role-card delivery ----
         for card in cards:
+            _switch_home()
             try:
-                note = _request_shared_space(
-                    session,
-                    host_home_space_id=host_home_space_id,
-                    participant_principals=[host_principal_id, card.principal_id],
-                    purpose=f"player-{card.principal_id[-12:]}",
-                    promise_wait_s=promise_wait_s,
-                    complete_wait_s=complete_wait_s,
+                note_space_id, note_access = _provision(
+                    f"player-{card.principal_id[-12:]}",
+                    [host_principal_id, card.principal_id],
                 )
             except Exception as exc:
                 raise RuntimeError(
                     f"per-player notebook provisioning failed for {card.principal_id}: {exc}"
                 ) from exc
-            card.private_space_id = note["shared_space_id"]
-            note_access = _extract_access(note)
+            card.private_space_id = note_space_id
             if note_access is not None:
                 subspace_access[card.private_space_id] = note_access
                 _connect_with_access(
