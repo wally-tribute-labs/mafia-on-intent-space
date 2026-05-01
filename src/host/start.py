@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import random
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -305,14 +306,26 @@ def _request_shared_space(
     if not isinstance(promise_id, str):
         raise RuntimeError(f"provisioning PROMISE missing promiseId: {promise!r}")
 
-    try:
-        session.post_and_confirm(
-            session.accept(promise_id=promise_id, parent_id=request_intent_id),
-            step=f"host.accept.{purpose}",
-            confirm_space_id=request_intent_id,
-        )
-    except Exception as exc:
-        raise RuntimeError(f"steward ACCEPT failed for {purpose}: {exc}") from exc
+    # spacebase1's steward occasionally returns HTTP 400 on the very first
+    # ACCEPT after a fresh PROMISE — empirically retrying with a new
+    # ACCEPT message after a short pause resolves it. Retry up to 3 times.
+    accept_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            session.post_and_confirm(
+                session.accept(promise_id=promise_id, parent_id=request_intent_id),
+                step=f"host.accept.{purpose}",
+                confirm_space_id=request_intent_id,
+            )
+            accept_exc = None
+            break
+        except Exception as exc:
+            accept_exc = exc
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+    if accept_exc is not None:
+        raise RuntimeError(f"steward ACCEPT failed for {purpose}: {accept_exc}") from accept_exc
 
     try:
         complete = session.wait_for_complete(

@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mafia on Intent-Space — Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            mafia: { 50:'#fef2f2',100:'#fee2e2',200:'#fecaca',400:'#f87171',500:'#ef4444',600:'#dc2626',700:'#b91c1c',900:'#7f1d1d' },
+            village: { 50:'#f0fdf4',100:'#dcfce7',200:'#bbf7d0',400:'#4ade80',500:'#22c55e',600:'#16a34a',700:'#15803d',900:'#14532d' },
+            detective: { 50:'#eff6ff',100:'#dbeafe',200:'#bfdbfe',400:'#60a5fa',500:'#3b82f6',600:'#2563eb',700:'#1d4ed8',900:'#1e3a5a' },
+            doctor: { 50:'#faf5ff',100:'#f3e8ff',200:'#e9d5ff',400:'#c084fc',500:'#a855f7',600:'#9333ea',700:'#7e22ce',900:'#581c87' },
+            night: { 800:'#1e293b',900:'#0f172a' },
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { background: #0f172a; color: #e2e8f0; font-family: 'Inter', system-ui, sans-serif; }
+    .scrollbar-thin::-webkit-scrollbar { width: 6px; }
+    .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+    .scrollbar-thin::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+    @keyframes pulse-dot { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+    .pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+    @keyframes fade-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    .fade-in { animation: fade-in 0.3s ease-out; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useCallback, useRef } = React;
+
+    const ROLE_COLORS = {
+      mafia:     { bg: 'bg-mafia-900/60',     border: 'border-mafia-500/40',     text: 'text-mafia-400',     badge: 'bg-mafia-500/20 text-mafia-400',     dot: 'bg-mafia-500' },
+      detective: { bg: 'bg-detective-900/60',  border: 'border-detective-500/40', text: 'text-detective-400', badge: 'bg-detective-500/20 text-detective-400', dot: 'bg-detective-500' },
+      doctor:    { bg: 'bg-doctor-900/60',     border: 'border-doctor-500/40',    text: 'text-doctor-400',    badge: 'bg-doctor-500/20 text-doctor-400',    dot: 'bg-doctor-500' },
+      villager:  { bg: 'bg-village-900/60',    border: 'border-village-500/40',   text: 'text-village-400',   badge: 'bg-village-500/20 text-village-400',   dot: 'bg-village-500' },
+    };
+
+    const KIND_ICONS = {
+      'accusation': '&#x1F5E3;',
+      'defense': '&#x1F6E1;',
+      'observation': '&#x1F441;',
+      'vote': '&#x2611;',
+      'id-vote': '&#x1F50D;',
+      'coven-target': '&#x1F5E1;',
+      'coven-confirm': '&#x2714;',
+      'investigate': '&#x1F50E;',
+      'investigate-result': '&#x1F4CB;',
+      'protect': '&#x1FA7A;',
+      'death': '&#x1F480;',
+      'phase-start': '&#x23F1;',
+      'phase-end': '&#x23F9;',
+      'game-end': '&#x1F3C1;',
+      'reveal': '&#x1F0CF;',
+      'game-init': '&#x1F3AE;',
+      'lobby-open': '&#x1F4E3;',
+      'lobby-join': '&#x1F44B;',
+      'role-card': '&#x1F3AD;',
+      'summary': '&#x1F4DD;',
+      'substrate-guess': '&#x1F916;',
+      'coven-membership': '&#x1F46A;',
+    };
+
+    const SPACE_LABELS = {
+      game: { icon: '&#x1F3AE;', color: 'text-amber-400' },
+      coven: { icon: '&#x1F5E1;', color: 'text-mafia-400' },
+      detective: { icon: '&#x1F50E;', color: 'text-detective-400' },
+      doctor: { icon: '&#x1FA7A;', color: 'text-doctor-400' },
+      commons: { icon: '&#x1F310;', color: 'text-slate-400' },
+      host: { icon: '&#x1F3E0;', color: 'text-slate-400' },
+      rolecard: { icon: '&#x1F3AD;', color: 'text-slate-400' },
+    };
+
+    function classifySpace(space, gameData) {
+      const sid = space.space_id;
+      if (sid === gameData.game_space_id) return 'game';
+      if (sid === gameData.coven_id) return 'coven';
+      if (sid === gameData.detective_id) return 'detective';
+      if (sid === gameData.doctor_id) return 'doctor';
+      if (sid === 'commons') return 'commons';
+      if (space.label?.startsWith('host')) return 'host';
+      if (space.label?.startsWith('role-card')) return 'rolecard';
+      return 'other';
+    }
+
+    function Badge({ children, className = '' }) {
+      return <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${className}`}>{children}</span>;
+    }
+
+    function RoleBadge({ role }) {
+      const c = ROLE_COLORS[role] || ROLE_COLORS.villager;
+      return <Badge className={c.badge}>{role}</Badge>;
+    }
+
+    function PlayerName({ pid, players, showRole = false }) {
+      const p = players[pid];
+      if (!p) return <span className="text-slate-500 font-mono text-xs">{pid?.slice(-8) || '?'}</span>;
+      const c = ROLE_COLORS[p.role] || ROLE_COLORS.villager;
+      return (
+        <span className="inline-flex items-center gap-1.5">
+          <span className={`w-2 h-2 rounded-full ${c.dot}`} />
+          <span className={`font-mono text-sm ${c.text}`}>{p.short}</span>
+          {showRole && <RoleBadge role={p.role} />}
+        </span>
+      );
+    }
+
+    function PhaseTag({ phase }) {
+      if (!phase) return null;
+      const isNight = phase.includes('night');
+      const isVote = phase.includes('vote');
+      const bg = isNight ? 'bg-indigo-500/20 text-indigo-300' : isVote ? 'bg-amber-500/20 text-amber-300' : 'bg-emerald-500/20 text-emerald-300';
+      return <Badge className={bg}>{phase}</Badge>;
+    }
+
+    function MessageBubble({ msg, players, isHost }) {
+      const c = ROLE_COLORS[players[msg.senderId]?.role] || { bg: 'bg-slate-800/60', border: 'border-slate-600/30', text: 'text-slate-300' };
+      const icon = KIND_ICONS[msg.kind] || '';
+      const isDeath = msg.kind === 'death';
+      const isGameEnd = msg.kind === 'game-end';
+      const isPhaseStart = msg.kind === 'phase-start';
+      const isPhaseEnd = msg.kind === 'phase-end';
+
+      if (isPhaseStart || isPhaseEnd) {
+        return (
+          <div className="flex items-center gap-3 py-2 fade-in">
+            <div className="flex-1 h-px bg-slate-700" />
+            <span className="text-xs text-slate-500 flex items-center gap-1.5">
+              <span dangerouslySetInnerHTML={{ __html: icon }} />
+              <PhaseTag phase={msg.phase} />
+              {isPhaseEnd && msg.lynched && <span className="text-mafia-400">lynched: {players[msg.lynched]?.short || msg.lynched?.slice(-8)}</span>}
+              {isPhaseEnd && msg.tally && <span className="text-slate-400">votes: {JSON.stringify(msg.tally)}</span>}
+            </span>
+            <div className="flex-1 h-px bg-slate-700" />
+          </div>
+        );
+      }
+
+      if (isDeath) {
+        const causeColor = msg.cause === 'mafia' ? 'text-mafia-400' : msg.cause === 'lynch' ? 'text-amber-400' : 'text-village-400';
+        return (
+          <div className="flex items-center justify-center gap-2 py-2 fade-in">
+            <span className="text-lg" dangerouslySetInnerHTML={{ __html: KIND_ICONS.death }} />
+            <span className={`text-sm font-medium ${causeColor}`}>
+              <PlayerName pid={msg.target} players={players} /> was killed ({msg.cause})
+            </span>
+          </div>
+        );
+      }
+
+      if (isGameEnd) {
+        const winColor = msg.winner === 'mafia' ? 'text-mafia-400' : msg.winner === 'villagers' ? 'text-village-400' : 'text-amber-400';
+        return (
+          <div className="flex flex-col items-center gap-1 py-4 fade-in">
+            <span className="text-2xl" dangerouslySetInnerHTML={{ __html: KIND_ICONS['game-end'] }} />
+            <span className={`text-lg font-bold ${winColor}`}>Game Over: {msg.winner} win!</span>
+          </div>
+        );
+      }
+
+      const showTarget = msg.target && ['vote', 'accusation', 'coven-target', 'investigate', 'protect', 'id-vote', 'substrate-guess'].includes(msg.kind);
+
+      return (
+        <div className={`rounded-lg border px-3 py-2 ${c.bg} ${c.border} fade-in`}>
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <div className="flex items-center gap-2">
+              <span className="text-sm" dangerouslySetInnerHTML={{ __html: icon }} />
+              <PlayerName pid={msg.senderId} players={players} />
+              <Badge className="bg-slate-700/50 text-slate-400">{msg.kind}</Badge>
+              {msg.phase && <PhaseTag phase={msg.phase} />}
+            </div>
+            <span className="text-[10px] text-slate-600 font-mono">{msg.seq || ''}</span>
+          </div>
+          {showTarget && (
+            <div className="text-xs text-slate-400 mb-1 flex items-center gap-1">
+              Target: <PlayerName pid={msg.target} players={players} showRole />
+              {msg.kind === 'id-vote' && msg.claimed_substrate && <Badge className="bg-slate-700/50 text-slate-400">{msg.claimed_substrate}</Badge>}
+              {msg.kind === 'substrate-guess' && msg.guess && <Badge className="bg-slate-700/50 text-slate-400">guess: {msg.guess} ({(msg.confidence*100).toFixed(0)}%)</Badge>}
+            </div>
+          )}
+          {msg.content && <p className="text-sm text-slate-300 leading-relaxed whitespace-pre-wrap">{msg.content}</p>}
+          {msg.reasoning && !msg.content && <p className="text-sm text-slate-400 italic">{msg.reasoning}</p>}
+          {msg.kind === 'investigate-result' && <p className="text-sm text-detective-400">Result: {msg.target?.slice(-8)} is a <span className="font-bold">{msg.role}</span></p>}
+          {msg.kind === 'reveal' && msg.role_assignments && (
+            <div className="mt-1 flex flex-wrap gap-1">
+              {Object.entries(msg.role_assignments).map(([pid, role]) => (
+                <span key={pid} className="inline-flex items-center gap-1 text-xs">
+                  <PlayerName pid={pid} players={players} />
+                  <RoleBadge role={role} />
+                </span>
+              ))}
+            </div>
+          )}
+          {msg.kind === 'coven-membership' && msg.members && (
+            <div className="flex flex-wrap gap-1 mt-1">
+              {msg.members.map(pid => <PlayerName key={pid} pid={pid} players={players} showRole />)}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function SpacePanel({ space, players, gameData, isSelected, onClick }) {
+      const spaceType = classifySpace(space, gameData);
+      const meta = SPACE_LABELS[spaceType] || SPACE_LABELS.commons;
+      const msgCount = space.message_count || 0;
+      return (
+        <button
+          onClick={onClick}
+          className={`w-full text-left px-3 py-2.5 rounded-lg border transition-all ${
+            isSelected
+              ? 'bg-slate-700/60 border-slate-500/60 shadow-lg'
+              : 'bg-slate-800/40 border-slate-700/30 hover:bg-slate-800/70 hover:border-slate-600/40'
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className={meta.color} dangerouslySetInnerHTML={{ __html: meta.icon }} />
+              <span className="text-sm font-medium text-slate-200 truncate max-w-[180px]">{space.label}</span>
+            </div>
+            <Badge className="bg-slate-700/60 text-slate-400">{msgCount}</Badge>
+          </div>
+        </button>
+      );
+    }
+
+    function GameOverview({ gameData }) {
+      const { players, outcome, phases } = gameData;
+      const playerList = Object.values(players || {});
+      const living = new Set();
+      const dead = [];
+
+      const gameSpace = gameData.spaces?.find(s => s.space_id === gameData.game_space_id);
+      if (gameSpace) {
+        playerList.forEach(p => living.add(p.principal_id));
+        for (const m of gameSpace.messages || []) {
+          if (m.kind === 'death' && m.target && m.cause !== 'saved') {
+            living.delete(m.target);
+            dead.push({ target: m.target, cause: m.cause });
+          }
+        }
+      }
+
+      const dayCount = phases?.filter(p => p.phase?.includes('discussion')).length || 0;
+      const winColor = outcome?.winner === 'mafia' ? 'text-mafia-400' : outcome?.winner === 'villagers' ? 'text-village-400' : 'text-amber-400';
+
+      return (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+          <div className="bg-slate-800/50 rounded-xl border border-slate-700/40 p-4">
+            <h3 className="text-xs uppercase tracking-wider text-slate-500 mb-3">Players</h3>
+            <div className="space-y-2">
+              {playerList.map(p => (
+                <div key={p.principal_id} className={`flex items-center justify-between ${!living.has(p.principal_id) ? 'opacity-40 line-through' : ''}`}>
+                  <PlayerName pid={p.principal_id} players={players} showRole />
+                  {!living.has(p.principal_id) && <span className="text-xs text-mafia-400">dead</span>}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="bg-slate-800/50 rounded-xl border border-slate-700/40 p-4">
+            <h3 className="text-xs uppercase tracking-wider text-slate-500 mb-3">Game Status</h3>
+            {outcome ? (
+              <div className="text-center py-4">
+                <p className={`text-2xl font-bold ${winColor}`}>{outcome.winner} win</p>
+                <p className="text-sm text-slate-400 mt-1">{dayCount} days played</p>
+              </div>
+            ) : (
+              <div className="text-center py-4">
+                <div className="w-3 h-3 rounded-full bg-emerald-500 mx-auto pulse-dot" />
+                <p className="text-sm text-emerald-400 mt-2">Game in progress</p>
+                <p className="text-xs text-slate-500 mt-1">{dayCount} days so far</p>
+              </div>
+            )}
+          </div>
+
+          <div className="bg-slate-800/50 rounded-xl border border-slate-700/40 p-4">
+            <h3 className="text-xs uppercase tracking-wider text-slate-500 mb-3">Spaces</h3>
+            <div className="grid grid-cols-2 gap-2">
+              {gameData.spaces?.slice(0, 6).map(s => {
+                const t = classifySpace(s, gameData);
+                const meta = SPACE_LABELS[t] || SPACE_LABELS.commons;
+                return (
+                  <div key={s.space_id} className="flex items-center gap-1.5 text-xs">
+                    <span className={meta.color} dangerouslySetInnerHTML={{ __html: meta.icon }} />
+                    <span className="text-slate-400 truncate">{s.label}</span>
+                    <span className="text-slate-600 ml-auto">{s.message_count}</span>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="text-[10px] text-slate-600 mt-2">{gameData.spaces?.length || 0} total spaces</p>
+          </div>
+        </div>
+      );
+    }
+
+    function Timeline({ gameData }) {
+      const gameSpace = gameData.spaces?.find(s => s.space_id === gameData.game_space_id);
+      if (!gameSpace) return null;
+
+      const events = [];
+      for (const m of gameSpace.messages) {
+        if (['phase-start', 'death', 'game-end', 'phase-end'].includes(m.kind)) {
+          events.push(m);
+        }
+      }
+
+      return (
+        <div className="bg-slate-800/50 rounded-xl border border-slate-700/40 p-4 mb-6">
+          <h3 className="text-xs uppercase tracking-wider text-slate-500 mb-3">Game Timeline</h3>
+          <div className="flex items-center gap-1 overflow-x-auto pb-2 scrollbar-thin">
+            {events.map((ev, i) => {
+              if (ev.kind === 'phase-start') {
+                const isNight = ev.phase?.includes('night');
+                return (
+                  <div key={i} className={`flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium ${isNight ? 'bg-indigo-900/40 text-indigo-300 border border-indigo-800/40' : 'bg-amber-900/30 text-amber-300 border border-amber-800/30'}`}>
+                    {ev.phase}
+                  </div>
+                );
+              }
+              if (ev.kind === 'death') {
+                const causeIcon = ev.cause === 'mafia' ? '&#x1F5E1;' : '&#x2694;';
+                return (
+                  <div key={i} className="flex-shrink-0 px-2 py-1.5 rounded-lg bg-mafia-900/40 border border-mafia-800/30 text-xs flex items-center gap-1">
+                    <span dangerouslySetInnerHTML={{ __html: causeIcon }} />
+                    <span className="text-mafia-400">{gameData.players[ev.target]?.short || ev.target?.slice(-8)}</span>
+                  </div>
+                );
+              }
+              if (ev.kind === 'phase-end' && ev.lynched) {
+                return (
+                  <div key={i} className="flex-shrink-0 px-2 py-1.5 rounded-lg bg-amber-900/30 border border-amber-800/30 text-xs flex items-center gap-1">
+                    <span>&#x2694;</span>
+                    <span className="text-amber-400">{gameData.players[ev.lynched]?.short || ev.lynched?.slice(-8)}</span>
+                  </div>
+                );
+              }
+              if (ev.kind === 'game-end') {
+                const wc = ev.winner === 'mafia' ? 'text-mafia-400 border-mafia-800/40 bg-mafia-900/40' : ev.winner === 'villagers' ? 'text-village-400 border-village-800/40 bg-village-900/40' : 'text-amber-400 border-amber-800/40 bg-amber-900/40';
+                return <div key={i} className={`flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-bold border ${wc}`}>{ev.winner}</div>;
+              }
+              return null;
+            })}
+          </div>
+        </div>
+      );
+    }
+
+    function ChatView({ space, players, filter }) {
+      const ref = useRef(null);
+      const msgs = useMemo(() => {
+        let list = space?.messages || [];
+        if (filter === 'discussion') list = list.filter(m => ['accusation','defense','observation','vote','id-vote','death','phase-start','phase-end','game-end','reveal'].includes(m.kind));
+        if (filter === 'votes') list = list.filter(m => ['vote','id-vote','phase-end','phase-start'].includes(m.kind));
+        if (filter === 'night') list = list.filter(m => ['coven-target','coven-confirm','investigate','investigate-result','protect','death','phase-start','phase-end','coven-membership'].includes(m.kind));
+        return list;
+      }, [space, filter]);
+
+      useEffect(() => {
+        if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+      }, [msgs.length]);
+
+      if (!space) return <div className="flex-1 flex items-center justify-center text-slate-600">Select a space</div>;
+
+      return (
+        <div ref={ref} className="flex-1 overflow-y-auto space-y-2 p-4 scrollbar-thin">
+          {msgs.length === 0 && <p className="text-center text-slate-600 py-8">No messages in this space</p>}
+          {msgs.map((m, i) => <MessageBubble key={m.intentId || m.promiseId || i} msg={m} players={players} />)}
+        </div>
+      );
+    }
+
+    function VotingTable({ gameData }) {
+      const gameSpace = gameData.spaces?.find(s => s.space_id === gameData.game_space_id);
+      if (!gameSpace) return null;
+
+      const phaseEnds = gameSpace.messages.filter(m => m.kind === 'phase-end' && m.phase?.includes('vote'));
+      if (phaseEnds.length === 0) return <p className="text-slate-600 p-4">No votes recorded yet</p>;
+
+      return (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-slate-700">
+                <th className="text-left py-2 px-3 text-xs uppercase text-slate-500">Phase</th>
+                <th className="text-left py-2 px-3 text-xs uppercase text-slate-500">Tally</th>
+                <th className="text-left py-2 px-3 text-xs uppercase text-slate-500">Lynched</th>
+              </tr>
+            </thead>
+            <tbody>
+              {phaseEnds.map((pe, i) => (
+                <tr key={i} className="border-b border-slate-800/50">
+                  <td className="py-2 px-3"><PhaseTag phase={pe.phase} /></td>
+                  <td className="py-2 px-3 text-xs text-slate-400">
+                    {pe.tally && Object.entries(pe.tally).map(([pid, count]) => (
+                      <span key={pid} className="inline-flex items-center gap-1 mr-3">
+                        <PlayerName pid={pid} players={gameData.players} /> <span className="text-amber-400 font-bold">{count}</span>
+                      </span>
+                    ))}
+                  </td>
+                  <td className="py-2 px-3">
+                    {pe.lynched ? <PlayerName pid={pe.lynched} players={gameData.players} showRole /> : <span className="text-slate-600">no lynch</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+    }
+
+    function App() {
+      const [gameData, setGameData] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState(null);
+      const [selectedSpaceId, setSelectedSpaceId] = useState(null);
+      const [filter, setFilter] = useState('all');
+      const [tab, setTab] = useState('chat');
+      const [autoRefresh, setAutoRefresh] = useState(true);
+
+      const fetchGame = useCallback(async () => {
+        try {
+          const res = await fetch('/api/game');
+          const data = await res.json();
+          setGameData(data);
+          setError(null);
+          if (!selectedSpaceId && data.game_space_id) {
+            setSelectedSpaceId(data.game_space_id);
+          }
+        } catch (e) {
+          setError(e.message);
+        } finally {
+          setLoading(false);
+        }
+      }, [selectedSpaceId]);
+
+      useEffect(() => { fetchGame(); }, []);
+      useEffect(() => {
+        if (!autoRefresh) return;
+        const id = setInterval(fetchGame, 5000);
+        return () => clearInterval(id);
+      }, [autoRefresh, fetchGame]);
+
+      const selectedSpace = useMemo(
+        () => gameData?.spaces?.find(s => s.space_id === selectedSpaceId),
+        [gameData, selectedSpaceId]
+      );
+
+      const groupedSpaces = useMemo(() => {
+        if (!gameData?.spaces) return {};
+        const groups = { key: [], rolecard: [], other: [] };
+        for (const s of gameData.spaces) {
+          const t = classifySpace(s, gameData);
+          if (['game','coven','detective','doctor'].includes(t)) groups.key.push(s);
+          else if (t === 'rolecard') groups.rolecard.push(s);
+          else groups.other.push(s);
+        }
+        return groups;
+      }, [gameData]);
+
+      if (loading) return (
+        <div className="min-h-screen flex items-center justify-center">
+          <div className="w-8 h-8 border-2 border-slate-600 border-t-slate-300 rounded-full animate-spin" />
+        </div>
+      );
+
+      if (error && !gameData) return (
+        <div className="min-h-screen flex items-center justify-center">
+          <div className="bg-mafia-900/40 border border-mafia-700/40 rounded-xl p-6 max-w-md text-center">
+            <p className="text-mafia-400 font-medium mb-2">Failed to load game</p>
+            <p className="text-sm text-slate-400 mb-4">{error}</p>
+            <button onClick={fetchGame} className="px-4 py-2 bg-slate-700 rounded-lg text-sm hover:bg-slate-600 transition">Retry</button>
+          </div>
+        </div>
+      );
+
+      if (!gameData) return null;
+
+      if (gameData.status === 'waiting') return (
+        <div className="min-h-screen flex items-center justify-center">
+          <div className="bg-slate-800/50 border border-slate-700/40 rounded-xl p-8 max-w-md text-center">
+            <div className="w-6 h-6 border-2 border-slate-600 border-t-amber-400 rounded-full animate-spin mx-auto mb-4" />
+            <p className="text-amber-400 font-medium mb-2">Waiting for game to start</p>
+            <p className="text-sm text-slate-400 mb-4">The dashboard will update automatically once the host provisions game spaces.</p>
+            <label className="flex items-center justify-center gap-2 text-xs text-slate-400 cursor-pointer">
+              <input type="checkbox" checked={autoRefresh} onChange={e => setAutoRefresh(e.target.checked)} className="rounded" />
+              Auto-refresh (5s)
+            </label>
+          </div>
+        </div>
+      );
+
+      return (
+        <div className="min-h-screen flex flex-col">
+          <header className="border-b border-slate-800 px-6 py-3 flex items-center justify-between bg-slate-900/80 backdrop-blur sticky top-0 z-50">
+            <div className="flex items-center gap-3">
+              <h1 className="text-lg font-bold text-slate-100">Mafia on Intent-Space</h1>
+              <Badge className="bg-slate-700/50 text-slate-400">Dashboard</Badge>
+            </div>
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
+                <input type="checkbox" checked={autoRefresh} onChange={e => setAutoRefresh(e.target.checked)} className="rounded" />
+                Auto-refresh (5s)
+              </label>
+              <button onClick={fetchGame} className="px-3 py-1.5 bg-slate-700 rounded-lg text-xs hover:bg-slate-600 transition flex items-center gap-1.5">
+                <span>&#x21BB;</span> Refresh
+              </button>
+            </div>
+          </header>
+
+          <div className="px-6 py-4">
+            <GameOverview gameData={gameData} />
+            <Timeline gameData={gameData} />
+          </div>
+
+          <div className="flex-1 flex min-h-0 px-6 pb-6 gap-4">
+            <div className="w-72 flex-shrink-0 flex flex-col gap-2 overflow-y-auto scrollbar-thin">
+              <p className="text-[10px] uppercase tracking-widest text-slate-600 px-1 mb-1">Key Spaces</p>
+              {(groupedSpaces.key || []).map(s => (
+                <SpacePanel key={s.space_id} space={s} players={gameData.players} gameData={gameData}
+                  isSelected={s.space_id === selectedSpaceId} onClick={() => setSelectedSpaceId(s.space_id)} />
+              ))}
+              <p className="text-[10px] uppercase tracking-widest text-slate-600 px-1 mt-3 mb-1">Role Cards</p>
+              {(groupedSpaces.rolecard || []).map(s => (
+                <SpacePanel key={s.space_id} space={s} players={gameData.players} gameData={gameData}
+                  isSelected={s.space_id === selectedSpaceId} onClick={() => setSelectedSpaceId(s.space_id)} />
+              ))}
+              {(groupedSpaces.other || []).length > 0 && (
+                <>
+                  <p className="text-[10px] uppercase tracking-widest text-slate-600 px-1 mt-3 mb-1">Other</p>
+                  {(groupedSpaces.other || []).map(s => (
+                    <SpacePanel key={s.space_id} space={s} players={gameData.players} gameData={gameData}
+                      isSelected={s.space_id === selectedSpaceId} onClick={() => setSelectedSpaceId(s.space_id)} />
+                  ))}
+                </>
+              )}
+            </div>
+
+            <div className="flex-1 flex flex-col bg-slate-800/30 rounded-xl border border-slate-700/30 min-h-0 overflow-hidden">
+              <div className="flex items-center justify-between border-b border-slate-700/30 px-4 py-2">
+                <div className="flex items-center gap-2">
+                  {['chat', 'votes'].map(t => (
+                    <button key={t} onClick={() => setTab(t)}
+                      className={`px-3 py-1 rounded-lg text-xs font-medium transition ${tab === t ? 'bg-slate-700 text-slate-200' : 'text-slate-500 hover:text-slate-300'}`}>
+                      {t === 'chat' ? 'Chat' : 'Voting'}
+                    </button>
+                  ))}
+                </div>
+                {tab === 'chat' && (
+                  <div className="flex items-center gap-1">
+                    {['all', 'discussion', 'votes', 'night'].map(f => (
+                      <button key={f} onClick={() => setFilter(f)}
+                        className={`px-2 py-0.5 rounded text-[10px] uppercase tracking-wider transition ${filter === f ? 'bg-slate-600 text-slate-200' : 'text-slate-500 hover:text-slate-300'}`}>
+                        {f}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              {tab === 'chat' && <ChatView space={selectedSpace} players={gameData.players} filter={filter} />}
+              {tab === 'votes' && <div className="flex-1 overflow-y-auto p-4 scrollbar-thin"><VotingTable gameData={gameData} /></div>}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

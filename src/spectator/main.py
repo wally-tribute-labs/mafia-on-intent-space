@@ -601,6 +601,41 @@ def run(
     )
     session.connect()
 
+    # The post-enrollment `connect()` binds the session to the spectator's
+    # HOME station, which can't see commons. Hop to the commons station
+    # so `scan_full("commons")` returns the lobby-open / summary INTENTs
+    # we actually care about.
+    commons_target = None
+    fetcher = getattr(session, "known_stations", None)
+    if callable(fetcher):
+        for entry in fetcher() or []:
+            if not isinstance(entry, dict):
+                continue
+            audience = entry.get("audience")
+            if isinstance(audience, str) and audience.endswith("/space/commons"):
+                commons_target = entry
+                break
+    if commons_target is not None and hasattr(session, "connect_to"):
+        try:
+            session.connect_to(
+                endpoint=commons_target["endpoint"],
+                station_token=commons_target["stationToken"],
+                audience=commons_target["audience"],
+                sender_id=commons_target.get("principalId"),
+            )
+            logger.info("switched session -> commons (audience=%s)",
+                        commons_target["audience"])
+        except Exception as exc:
+            logger.warning(
+                "could not switch to commons station (%s) — scans may be empty",
+                exc,
+            )
+    else:
+        logger.warning(
+            "commons station not found in known-stations.json — "
+            "the spectator's commons scans will likely return nothing"
+        )
+
     my_principal_id: str | None = None
     try:
         identity = session.identity()

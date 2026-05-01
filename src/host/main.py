@@ -20,9 +20,84 @@ import json
 import logging
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 
 SPACEBASE1_ORIGIN = "https://spacebase1.differ.ac"
+
+
+def _build_observatory_url(space_id: str, station_token: str) -> str:
+    return (
+        f"{SPACEBASE1_ORIGIN}/observatory#"
+        f"origin={quote(SPACEBASE1_ORIGIN, safe='')}"
+        f"&space={quote(space_id, safe='')}"
+        f"&token={quote(station_token, safe='')}"
+    )
+
+
+def _label_space(space_id: str, state) -> str:
+    """Human-readable label for an observatory entry."""
+    if space_id == "commons":
+        return "commons"
+    if space_id == state.host_home_space_id:
+        return "host-home"
+    if space_id == state.game_space_id:
+        return "game-space (public day discussion + voting)"
+    if state.coven_id and space_id == state.coven_id:
+        return "coven (mafia private)"
+    if state.detective_id and space_id == state.detective_id:
+        return "detective-notebook"
+    if state.doctor_id and space_id == state.doctor_id:
+        return "doctor-notebook"
+    for card in state.player_cards:
+        if card.private_space_id == space_id:
+            return f"role-card to {card.role} ({card.principal_id[-8:]})"
+    return f"other ({space_id[-8:]})"
+
+
+def _dump_spaces_summary(workspace: Path, state, log: logging.Logger) -> Path:
+    """Persist every space the host can observe, with an observatory URL."""
+    spaces: list[dict] = []
+    for space_id, access in state.subspace_access.items():
+        if not isinstance(access, dict):
+            continue
+        token = access.get("station_token")
+        if not isinstance(token, str):
+            continue
+        spaces.append({
+            "space_id": space_id,
+            "label": _label_space(space_id, state),
+            "audience": access.get("audience"),
+            "observatory_url": _build_observatory_url(space_id, token),
+        })
+    spaces.sort(key=lambda s: (
+        0 if s["label"] == "commons" else
+        1 if s["label"] == "host-home" else
+        2 if s["label"].startswith("game-space") else
+        3 if s["label"].startswith("coven") else
+        4 if s["label"].startswith("detective") else
+        5 if s["label"].startswith("doctor") else
+        6
+    ))
+    out = {
+        "host_principal_id": state.host_principal_id,
+        "host_home_space_id": state.host_home_space_id,
+        "game_space_id": state.game_space_id,
+        "coven_id": state.coven_id,
+        "detective_id": state.detective_id,
+        "doctor_id": state.doctor_id,
+        "players": list(state.players),
+        "role_truth": dict(state.role_truth),
+        "lobby_intent_id": state.lobby_intent_id,
+        "spaces": spaces,
+    }
+    path = workspace / "host-spaces.json"
+    try:
+        path.write_text(json.dumps(out, indent=2))
+        log.info("wrote host-spaces.json with %d space(s) -> %s", len(spaces), path)
+    except OSError as exc:
+        log.warning("could not write host-spaces.json: %s", exc)
+    return path
 
 
 def _resolve_sdk_path(start: Path) -> Path:
@@ -222,6 +297,8 @@ def main(argv: list[str] | None = None) -> int:
         state.detective_id,
         state.doctor_id,
     )
+
+    _dump_spaces_summary(workspace, state, log)
 
     try:
         outcome = run_game_loop(session, state, max_days=args.max_days)

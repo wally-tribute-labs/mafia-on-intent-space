@@ -37,6 +37,8 @@ from typing import IO
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOGS_DIR = PROJECT_ROOT / "logs"
+SPECTATOR_WORKSPACE = PROJECT_ROOT / ".intent-space-mafia-spectator"
+HOST_WORKSPACE = PROJECT_ROOT / ".intent-space-mafia-game-host"
 
 
 def _load_dotenv() -> None:
@@ -157,6 +159,95 @@ def _read_observatory_url(workspace: Path) -> str | None:
     return url if isinstance(url, str) else None
 
 
+def _ensure_spectator_enrolled(log: logging.Logger) -> bool:
+    """Make sure .intent-space-mafia-spectator exists, enrolling if needed."""
+    if (SPECTATOR_WORKSPACE / "enrollment-summary.json").exists():
+        return True
+    log.info("spectator workspace missing — enrolling now ...")
+    enroll_script = PROJECT_ROOT / "scripts" / "enroll_agent.py"
+    if not enroll_script.exists():
+        log.error("enrollment script not found: %s", enroll_script)
+        return False
+    enroll_log_path = LOGS_DIR / "enroll-spectator.log"
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    with enroll_log_path.open("w", encoding="utf-8") as fh:
+        rc = subprocess.run(
+            [
+                sys.executable,
+                str(enroll_script),
+                "--agent-name",
+                "mafia-spectator",
+                "--workspace",
+                str(SPECTATOR_WORKSPACE),
+            ],
+            cwd=str(PROJECT_ROOT),
+            stdout=fh,
+            stderr=subprocess.STDOUT,
+            text=True,
+        ).returncode
+    if rc != 0:
+        log.error("spectator enrollment failed (rc=%d) — see %s", rc, enroll_log_path)
+        return False
+    log.info("spectator enrolled. enrollment log: %s", enroll_log_path)
+    return True
+
+
+def _wait_for_host_spaces(timeout_s: float, log: logging.Logger) -> dict | None:
+    """Poll for HOST_WORKSPACE/host-spaces.json which the host writes once
+    the game space + role subspaces + per-player notebooks are provisioned.
+    Returns the parsed dict, or None on timeout.
+    """
+    path = HOST_WORKSPACE / "host-spaces.json"
+    deadline = time.time() + timeout_s
+    last_size = -1
+    while time.time() < deadline:
+        if path.exists():
+            try:
+                data = json.loads(path.read_text())
+            except Exception:
+                data = None
+            if isinstance(data, dict) and data.get("spaces"):
+                size = len(data["spaces"])
+                if size != last_size:
+                    last_size = size
+                # The host writes once at the start; no reason to wait for more.
+                return data
+        time.sleep(1.0)
+    log.warning("host-spaces.json never appeared in %s after %.0fs",
+                HOST_WORKSPACE, timeout_s)
+    return None
+
+
+def _print_spaces_banner(spaces_data: dict) -> None:
+    """Big obvious banner with every observatory URL the host can see."""
+    spaces = spaces_data.get("spaces") or []
+    role_truth = spaces_data.get("role_truth") or {}
+    print()
+    print("=" * 78)
+    print("  HOST'S VIEW: every space currently provisioned for this game")
+    print("=" * 78)
+    print(f"  game space id:       {spaces_data.get('game_space_id')}")
+    print(f"  coven id:            {spaces_data.get('coven_id')}")
+    print(f"  detective id:        {spaces_data.get('detective_id')}")
+    print(f"  doctor id:           {spaces_data.get('doctor_id')}")
+    print(f"  player count:        {len(spaces_data.get('players') or [])}")
+    print(f"  lobby intent id:     {spaces_data.get('lobby_intent_id')}")
+    print()
+    if role_truth:
+        print("  role assignments (host's truth — DO NOT share before game-end):")
+        for principal, role in sorted(role_truth.items()):
+            print(f"    {principal[-12:]:>12}  {role}")
+        print()
+    print("  Observatory URLs — open each in a browser to watch the game live:")
+    print()
+    for s in spaces:
+        print(f"  ▸ {s.get('label')}")
+        print(f"      {s.get('observatory_url')}")
+        print()
+    print("=" * 78)
+    print()
+
+
 def _wait_for_host(host: Child, bot_children: list[Child],
                    *, timeout_s: float, log: logging.Logger) -> tuple[bool, float]:
     """Wait until the host process exits or the timeout is reached.
@@ -224,15 +315,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--phase-multiplier", type=float, default=1.0)
     parser.add_argument("--lobby-deadline-s", type=float, default=90.0)
     parser.add_argument("--max-days", type=int, default=7)
-    parser.add_argument("--timeout-s", type=float, default=600.0,
+    parser.add_argument("--timeout-s", type=float, default=1200.0,
                         help="Hard timeout for the host process before forced teardown.")
     parser.add_argument("--bot-finish-grace-s", type=float, default=45.0,
                         help="After host exits, wait this long for bots to observe game-end.")
+    parser.add_argument("--spectator-finish-grace-s", type=float, default=60.0,
+                        help="After bots exit, wait this long for the spectator to post its summary.")
     parser.add_argument("--persona", default="random",
                         help="Force a specific persona for every bot, or 'random'.")
     parser.add_argument("--llm-model", default="claude-haiku-4-5-20251001")
     parser.add_argument("--rng-seed", type=int, default=None)
     parser.add_argument("--log-level", default="INFO")
+    parser.add_argument(
+        "--spectator",
+        choices=["on", "off"],
+        default="on",
+        help="Launch the spectator agent alongside the host + bots (auto-enrolls if needed).",
+    )
+    parser.add_argument(
+        "--spaces-wait-s",
+        type=float,
+        default=180.0,
+        help="How long to wait for host-spaces.json (i.e. all subspaces provisioned).",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -248,7 +353,22 @@ def main(argv: list[str] | None = None) -> int:
     if not _verify_player_workspaces(args.player_count, log):
         return 3
 
+    if args.spectator == "on":
+        if not _ensure_spectator_enrolled(log):
+            log.error("could not enroll spectator — aborting")
+            return 3
+
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    for stale_ndjson in LOGS_DIR.glob("*.ndjson"):
+        stale_ndjson.unlink(missing_ok=True)
+    # Drop any stale host-spaces.json from a previous run so we wait for the
+    # new one rather than printing last game's URLs.
+    stale = HOST_WORKSPACE / "host-spaces.json"
+    if stale.exists():
+        try:
+            stale.unlink()
+        except OSError:
+            pass
     rng = random.Random(args.rng_seed)
     base_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     children: list[Child] = []
@@ -306,6 +426,25 @@ def main(argv: list[str] | None = None) -> int:
         children.append(bot)
         bot_children.append(bot)
 
+    # --- 2b. Launch spectator (optional but on by default) ---
+    spectator_child: Child | None = None
+    if args.spectator == "on":
+        spec_argv = [
+            sys.executable, "-m", "src.spectator.main",
+            "--workspace", str(SPECTATOR_WORKSPACE),
+            "--agent-name", "mafia-spectator",
+            "--poll-interval-s", "5.0",
+            "--log-level", args.log_level,
+        ]
+        log.info("spawning spectator")
+        spectator_child = _spawn("spectator", spec_argv, base_env)
+        children.append(spectator_child)
+
+    # --- 2c. Once host has provisioned spaces, surface every observatory URL ---
+    spaces_data = _wait_for_host_spaces(args.spaces_wait_s, log)
+    if spaces_data is not None:
+        _print_spaces_banner(spaces_data)
+
     # --- 3. Wait for the host to finish ---
     log.info("waiting for host to exit (timeout=%.0fs) ...", args.timeout_s)
     finished, elapsed = _wait_for_host(
@@ -314,8 +453,12 @@ def main(argv: list[str] | None = None) -> int:
     host_rc = host_child.proc.returncode
     log.info("host exited rc=%s after %.1fs (or timed out)", host_rc, elapsed)
 
-    # --- 4. Give bots a chance to see game-end, then tear down leftovers ---
+    # --- 4. Give bots + spectator time to see game-end, then tear down ---
     _wait_for_bots(bot_children, grace_s=args.bot_finish_grace_s, log=log)
+    if spectator_child is not None and spectator_child.proc.poll() is None:
+        log.info("waiting up to %.0fs for spectator to post its summary ...",
+                 args.spectator_finish_grace_s)
+        _wait_for_bots([spectator_child], grace_s=args.spectator_finish_grace_s, log=log)
     _terminate_all(children, log)
 
     # --- 5. Summary ---
@@ -342,7 +485,22 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  bot exit codes:")
     for name, rc in bot_exits:
         print(f"    {name}: rc={rc}")
+    if spectator_child is not None:
+        print(f"  spectator exit code:   {spectator_child.proc.returncode}")
+        print(f"  spectator log:         {LOGS_DIR}/spectator.log")
     print("=" * 64)
+
+    # Reprint observatory URLs at the end so they're easy to copy after
+    # scrolling through orchestrator output.
+    final_spaces = None
+    spaces_path = HOST_WORKSPACE / "host-spaces.json"
+    if spaces_path.exists():
+        try:
+            final_spaces = json.loads(spaces_path.read_text())
+        except Exception:
+            final_spaces = None
+    if final_spaces is not None:
+        _print_spaces_banner(final_spaces)
 
     if not finished:
         return 4

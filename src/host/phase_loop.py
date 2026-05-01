@@ -24,8 +24,10 @@ The host posts COMPLETE on the phase-start INTENT for phase-end.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
+from pathlib import Path
 from typing import Callable
 
 from src.game.night_resolve import resolve_night
@@ -36,6 +38,29 @@ from ._validate import validate
 from .start import GameState
 
 logger = logging.getLogger(__name__)
+
+_EVENTS_LOG: Path | None = None
+
+
+def _init_event_log() -> None:
+    global _EVENTS_LOG
+    if _EVENTS_LOG is not None:
+        return
+    logs_dir = Path("logs")
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    _EVENTS_LOG = logs_dir / "host-events.ndjson"
+
+
+def _log_event(kind: str, **fields) -> None:
+    _init_event_log()
+    assert _EVENTS_LOG is not None
+    entry = {"ts": time.time(), "kind": kind}
+    entry.update({k: v for k, v in fields.items() if v is not None})
+    try:
+        with _EVENTS_LOG.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+    except OSError:
+        pass
 
 
 # Default phase durations in seconds (pre-multiplier).
@@ -79,6 +104,8 @@ def _post_phase_start(
     intent_id = posted.get("intentId") or intent.get("intentId")
     if not isinstance(intent_id, str):
         raise RuntimeError(f"phase-start did not return intentId: {posted!r}")
+    _log_event("phase-start", phase=phase, space_id=space_id,
+               intent_id=intent_id, living=living, deaths=deaths)
     return intent_id
 
 
@@ -117,6 +144,9 @@ def _post_phase_end(
     posted = session.post_and_confirm(
         complete, step="host.phase-end", confirm_space_id=space_id
     )
+    _log_event("phase-end", phase_intent_id=phase_intent_id,
+               next_phase=next_phase, tally=extras.get("tally") if extras else None,
+               lynched=extras.get("lynched") if extras else None)
     return posted
 
 
@@ -140,9 +170,11 @@ def _post_death(
         parent_id=space_id,
         payload=payload,
     )
-    return session.post_and_confirm(
+    posted = session.post_and_confirm(
         intent, step=f"host.death.{target[-8:]}", confirm_space_id=space_id
     )
+    _log_event("death", target=target, cause=cause)
+    return posted
 
 
 def _post_game_end(
@@ -163,9 +195,11 @@ def _post_game_end(
         parent_id=space_id,
         payload=payload,
     )
-    return session.post_and_confirm(
+    posted = session.post_and_confirm(
         intent, step="host.game-end", confirm_space_id=space_id
     )
+    _log_event("game-end", winner=winner)
+    return posted
 
 
 def _post_reveal(
@@ -188,9 +222,12 @@ def _post_reveal(
         summary="reveal",
         payload=payload,
     )
-    return session.post_and_confirm(
+    posted = session.post_and_confirm(
         complete, step="host.reveal", confirm_space_id=state.game_space_id
     )
+    _log_event("reveal", role_assignments=dict(state.role_truth),
+               substrate_assignments=dict(state.substrate_truth))
+    return posted
 
 
 def _post_summary_to_commons(
@@ -233,9 +270,26 @@ def _post_summary_to_commons(
     # space when present, top-level commons otherwise). Confirming via a
     # commons scan would never see it — post_and_confirm matches by
     # parentId+intentId in the scanned interior.
-    return session.post_and_confirm(
+    posted = session.post_and_confirm(
         intent, step="host.summary", confirm_space_id=parent
     )
+    # Also mirror at top-level commons so the spectator (which scans the
+    # commons station, not each lobby-open's interior) can discover
+    # finished games. Best-effort — failures here don't break the run.
+    if parent != "commons":
+        try:
+            mirror = session.intent(
+                content=payload["content"],
+                parent_id="commons",
+                payload=payload,
+            )
+            session.post_and_confirm(
+                mirror, step="host.summary.commons-mirror",
+                confirm_space_id="commons",
+            )
+        except Exception as exc:
+            logger.warning("commons-mirror summary post failed: %s", exc)
+    return posted
 
 
 def _connect_to_space(session, space_id: str, state: GameState | None = None) -> None:
@@ -537,6 +591,7 @@ def run_game_loop(
             session.post_and_confirm(
                 intent, step="host.death.saved", confirm_space_id=state.game_space_id
             )
+            _log_event("death", target="(saved)", cause="saved")
 
         outcome = compute_winner(living, state.role_truth)
         if outcome is not None:

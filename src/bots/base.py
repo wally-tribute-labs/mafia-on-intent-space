@@ -119,6 +119,30 @@ class BotAgent:
                 self._all_principals.add(sender)
 
     # ------------------------------------------------------------------
+    # Phase derivation
+    # ------------------------------------------------------------------
+    def _latest_phase(self, scans: dict[str, list[dict]]) -> Optional[dict]:
+        """Latest unmatched phase-start across every space this bot can see.
+
+        Night phases are posted in the role subspace (coven / detective-
+        notebook / doctor-notebook), not in the public game space — so a
+        bot that only consults `scans["game"]` would never see them and
+        would skip its night action. Walk every scan and return the
+        latest phase-start INTENT by timestamp.
+        """
+        latest: Optional[dict] = None
+        latest_ts = -1
+        for msgs in scans.values():
+            cand = current_phase(msgs)
+            if cand is None:
+                continue
+            ts = cand.get("timestamp", 0) or 0
+            if ts > latest_ts:
+                latest = cand
+                latest_ts = ts
+        return latest
+
+    # ------------------------------------------------------------------
     # Action gating
     # ------------------------------------------------------------------
     def should_act(self, phase: Optional[dict], scans: dict[str, list[dict]] | None = None) -> Optional[str]:
@@ -157,7 +181,7 @@ class BotAgent:
     # LLM decision
     # ------------------------------------------------------------------
     def decide(self, action_kind: str, scans: dict[str, list[dict]]) -> dict | None:
-        phase = current_phase(scans.get("game", []))
+        phase = self._latest_phase(scans)
         if phase is None:
             return None
 
@@ -233,6 +257,9 @@ class BotAgent:
             scanned=0,
             post_id=intent.get("intentId"),
             llm_latency_ms=decision.get("_latency_ms"),
+            target=(payload or {}).get("target"),
+            reasoning=(payload or {}).get("reasoning"),
+            content=(payload or {}).get("content"),
         )
         return intent
 
@@ -405,7 +432,7 @@ class BotAgent:
                 self._log_iter(None, "game-end", scanned=len(game_msgs))
                 return
 
-            phase = current_phase(game_msgs)
+            phase = self._latest_phase(scans)
             action_kind = self.should_act(phase, scans)
             if action_kind:
                 decision = self.decide(action_kind, scans)
@@ -427,6 +454,9 @@ class BotAgent:
         post_id: str | None = None,
         llm_latency_ms: int | None = None,
         error: str | None = None,
+        target: str | None = None,
+        reasoning: str | None = None,
+        content: str | None = None,
     ) -> None:
         entry = {
             "ts": time.time(),
@@ -437,6 +467,9 @@ class BotAgent:
             "llm_latency_ms": llm_latency_ms,
             "post_id": post_id,
             "error": error,
+            "target": target,
+            "reasoning": reasoning,
+            "content": content,
         }
         try:
             with self._log_path.open("a", encoding="utf-8") as fh:

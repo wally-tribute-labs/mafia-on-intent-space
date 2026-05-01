@@ -366,10 +366,18 @@ def _identify(space_sessions: dict[str, HttpSpaceToolSession],
     """Identify the game space, the role, and the role-subspace session.
 
     Returns (role, game_session, role_subspace_session_or_None).
+
+    Detective and doctor subspaces are normally identified by a `phase-start`
+    INTENT carrying `-detective` / `-doctor` — but those don't get posted
+    until night-1. To let the bot start playing day-1 anyway we fall back
+    to "the leftover invited space that isn't the game and isn't this
+    bot's role-card notebook" when the bot's role is detective or doctor.
     """
     game_session: HttpSpaceToolSession | None = None
+    notebook_space_id: str | None = None
     role_subspace_session: HttpSpaceToolSession | None = None
     discovered_role: str = "villager"
+    classified: dict[str, dict[str, Any]] = {}
 
     for space_id, sess in space_sessions.items():
         try:
@@ -378,6 +386,7 @@ def _identify(space_sessions: dict[str, HttpSpaceToolSession],
             log.warning("scan failed for invited space %s: %s", space_id, exc)
             continue
         info = _classify_space(messages, principal_id)
+        classified[space_id] = info
         log.info(
             "  space=%s game=%s notebook=%s coven=%s role_sub_for=%s discovered_role=%s",
             space_id, info["is_game"], info["is_notebook"], info["is_coven"],
@@ -387,6 +396,7 @@ def _identify(space_sessions: dict[str, HttpSpaceToolSession],
             game_session = sess
         if info["is_notebook"] and isinstance(info["discovered_role"], str):
             discovered_role = info["discovered_role"]
+            notebook_space_id = space_id
         if info["is_coven"] or info["role_subspace_for"] in {"detective", "doctor"}:
             role_subspace_session = sess
 
@@ -395,6 +405,49 @@ def _identify(space_sessions: dict[str, HttpSpaceToolSession],
             "could not identify game space among invited spaces "
             "(no game-init INTENT seen)"
         )
+
+    # Late-binding fallback for detective / doctor: their role subspace
+    # has no identifying INTENT until night-1, but it's reliably the only
+    # invited space that's neither the game nor this bot's notebook.
+    if discovered_role in {"detective", "doctor"} and role_subspace_session is None:
+        leftovers = [
+            (sid, sess) for sid, sess in space_sessions.items()
+            if not classified.get(sid, {}).get("is_game")
+            and not classified.get(sid, {}).get("is_coven")
+            and sid != notebook_space_id
+        ]
+        if len(leftovers) == 1:
+            sid, sess = leftovers[0]
+            role_subspace_session = sess
+            log.info(
+                "  fallback: assigning leftover space %s as %s subspace",
+                sid, discovered_role,
+            )
+        elif len(leftovers) > 1:
+            # Multiple candidates — stale invitations from prior games.
+            # Pick the one with fewest messages (freshly provisioned).
+            best_sid, best_sess, best_count = None, None, float("inf")
+            for sid, sess in leftovers:
+                try:
+                    msgs = sess.scan_full(sid).get("messages", [])
+                    count = len(msgs)
+                except Exception:
+                    count = 999
+                log.info("  fallback candidate %s has %d messages", sid, count)
+                if count < best_count:
+                    best_sid, best_sess, best_count = sid, sess, count
+            if best_sess is not None:
+                role_subspace_session = best_sess
+                log.info(
+                    "  fallback: picked %s (%d msgs) as %s subspace from %d candidates",
+                    best_sid, best_count, discovered_role, len(leftovers),
+                )
+            else:
+                log.warning(
+                    "  fallback for %s subspace failed: %d candidate(s) (%s)",
+                    discovered_role, len(leftovers), [sid for sid, _ in leftovers],
+                )
+
     return discovered_role, game_session, role_subspace_session
 
 
@@ -446,7 +499,7 @@ def main(argv: list[str] | None = None) -> int:
                         choices=["agent", "human"])
     parser.add_argument("--lobby-wait-s", type=float, default=180.0)
     parser.add_argument("--invitation-wait-s", type=float, default=240.0)
-    parser.add_argument("--invitation-settle-s", type=float, default=10.0,
+    parser.add_argument("--invitation-settle-s", type=float, default=45.0,
                         help="After min invitations arrive, wait this long for late ones.")
     parser.add_argument("--min-invitations", type=int, default=2,
                         help="Minimum invitations to wait for (game + notebook).")
